@@ -1,7 +1,9 @@
 from gurobipy import *
 import pandas as pd
 
-def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, filestr, phasedict):
+DEBUG = False
+
+def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, filestr, phasedict, verbose = False):
     
     crane_ids = list(cranes_df['ind'].unique())
     loc_ids = list(crane_locs_df['ind'].unique())
@@ -9,7 +11,7 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
     crane_list = cranes_df.to_dict(orient = 'split')['data']
     loc_list = crane_locs_df.to_dict(orient = 'split')['data']
     
-    print('Reading data..', end = '')
+    if verbose: print('Reading data..', end = '')
     kl_dict = {
         crane_id: {
             'loc_ids': {
@@ -57,26 +59,21 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
             kl_dict[crane_id]['loc_ids'][loc_id]['y'] = y    
             kl_dict[crane_id]['loc_ids'][loc_id]['z'] = z 
 
-    print('Done')
-
-    def pass_supply_points(loc, maxR):
-        """
-        :param loc: dict of {x, y, z}
-        """
-        return any((sx - loc['x']) ** 2 + (sy - loc['y']) ** 2 < maxR ** 2 \
-                   for sx, sy in zip(supply_points_df['X'], supply_points_df['Y']))
-
-    def pass_supply_phases(phases):
-        return all(phases in sp for sp in supply_points_df['Phase'])
-
+    if verbose: print('Done')
+    if DEBUG: print(kl_dict)
+    
+    def pass_supply(loc, maxR, phases):
+        xyz = (supply_points_df['X'].astype(float) - loc['x']) ** 2 + (supply_points_df['Y'].astype(float) - loc['y']) ** 2 < maxR ** 2
+        phase = supply_points_df['Phase'].apply(lambda sp: any(p in sp for p in phases))
+        return any(xyz & phase)
+    
     # Check supply constraints    
-    print('Checking supply constraints..', end = '')
+    if verbose: print('Checking supply constraints..', end = '')
     kls_dict = {
         crane_id: {
             'loc_ids': {
                 loc_id: kl_dict[crane_id]['loc_ids'][loc_id] for loc_id in loc_ids \
-                if pass_supply_points(kl_dict[crane_id]['loc_ids'][loc_id], kl_dict[crane_id]['max_r']) \
-                and pass_supply_phases(kl_dict[crane_id]['phases'])
+                if pass_supply(kl_dict[crane_id]['loc_ids'][loc_id], kl_dict[crane_id]['max_r'], kl_dict[crane_id]['phases'])
             },
             'max_r': kl_dict[crane_id]['max_r'],
             'height': kl_dict[crane_id]['height'],
@@ -87,11 +84,13 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
         } for crane_id in kl_dict.keys() 
     }
 
-    print('Done')
+    if verbose: print('Done')
+    if DEBUG: print(kls_dict)
 
-    prev_len = sum([len(v['loc_ids']) * len(list_powerset(v['phases'])[1:]) for v in kl_dict.values()])
-    new_len = sum([len(v['loc_ids']) * len(list_powerset(v['phases'])[1:]) for v in kls_dict.values()])
-    print(f'Removed {(prev_len - new_len)} crane-loc-phases that fail supply constraints')
+    if verbose: 
+        prev_len = sum([len(v['loc_ids']) * len(list_powerset(v['phases'])[1:]) for v in kl_dict.values()])
+        new_len = sum([len(v['loc_ids']) * len(list_powerset(v['phases'])[1:]) for v in kls_dict.values()])
+        print(f'Removed {(prev_len - new_len)} crane-loc-phases that fail supply constraints')
 
     def passed_demand_points(loc, maxR, height, max_moment, phase):
         """
@@ -103,11 +102,11 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
         pass_dist = [dist < maxR ** 2 for dist in c_sq]
         pass_height = [loc['z'] + height >= dz for dz in demand_points_df['Z']]
         pass_moment = [dist * v <= max_moment for dist, v in zip(c_sq, demand_points_df['Vol'])]
-        pass_phase = [dp == phase for dp in demand_points_df['Phase']]
+        pass_phase = [any(p in dp for p in phase) for dp in demand_points_df['Phase']]
         return [d and h and m and p for d, h, m, p in zip(pass_dist, pass_height, pass_moment, pass_phase)]
 
     # Check demand and moment constraints
-    print('Checking demand, moment and phase constraints..', end = '')
+    if verbose: print('Checking demand, moment and phase constraints..', end = '')
     klsd_dict = {
         crane_id: {
             'loc_ids': {loc_id: {
@@ -122,7 +121,13 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
         } for crane_id in kls_dict.keys()
     }
 
-    print('Done')
+    if verbose: print('Done')
+    if DEBUG: print(klsd_dict)
+        
+    if verbose: 
+        prev_len = sum([len(v['loc_ids']) * len(list_powerset(v['phases'])[1:]) for v in kls_dict.values()])
+        new_len = sum([len(v['loc_ids']) * len(list_powerset(v['phases'])[1:]) for v in klsd_dict.values()])
+        print(f'Removed {(prev_len - new_len)} crane-loc-phases that fail demand constraints')
 
     def union_phases(demand_flags, phases):
         """
@@ -139,7 +144,7 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
         return union
 
     # Check phase constraint
-    print('Taking powerset of phases..', end = '')
+    if verbose: print('Taking powerset of phases..', end = '')
     klsdp_dict = {
         crane_id: {
             'loc_ids': {
@@ -152,18 +157,21 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
             'fixed': klsd_dict[crane_id]['fixed'],
         } for crane_id in klsd_dict.keys()
     }
-    print('Done')
-    passed = sum(
-        [sum(
+    if verbose: print('Done')
+    if DEBUG: print(klsdp_dict)
+    
+    if verbose: 
+        passed = sum(
             [sum(
                 [sum(
-                    klsdp_dict[k]['loc_ids'][l][p]) for p in klsdp_dict[k]['loc_ids'][l].keys()]) \
-                    for l in klsdp_dict[k]['loc_ids'].keys()]) \
-                    for k in klsdp_dict.keys()]
-    )
-    print(f'Total valid crane-loc-phases: {passed}')
+                    [sum(
+                        klsdp_dict[k]['loc_ids'][l][p]) for p in klsdp_dict[k]['loc_ids'][l].keys()]) \
+                        for l in klsdp_dict[k]['loc_ids'].keys()]) \
+                        for k in klsdp_dict.keys()]
+        )
+        print(f'Total valid crane-loc-phases: {passed}')
 
-    print('Binarizing boolean values..', end = '')
+    if verbose: print('Binarizing boolean values..', end = '')
     def binarize(l):
         """
         Converts list of boolean to list of 1's and 0's
@@ -178,12 +186,11 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
             } for loc_id in klsdp_dict[crane_id]['loc_ids'].keys()
         } for crane_id in klsdp_dict.keys()
     }
-    print('Done')
+    if verbose: print('Done')
     
     m = Model("SCP")
-#     phasedict = {'a': 33, 'b': 7, 'c': 11}
 
-    print('Computing costs..', end = '')
+    if verbose: print('Computing costs..', end = '')
 
     krane = []
     total_cost = []
@@ -198,7 +205,8 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
                 total_cost.append(calc_cost1(cost, fixed, phase, phasedict))
                 A.append(demand_flags)
 
-    print('Done\nAdding constraints..', end = '')
+    if verbose: print('Done\nAdding constraints..', end = '')
+    if DEBUG: print(len(A))
     m.update()
 
     for i in range(len(A[0])):
@@ -209,9 +217,9 @@ def solve_scp(demand_points_df, supply_points_df, crane_locs_df, cranes_df, file
         m.addConstr(expr, GRB.GREATER_EQUAL, 1)
 
     m.setObjective(quicksum(krane[i] * total_cost[i] for i in range(len(krane))), GRB.MINIMIZE)
-    print('Done\nStart optimize..', end = '')
+    if verbose: print('Done\nStart optimize..', end = '')
     m.optimize()
-    print('Done')
+    if verbose: print('Done')
     m.write(filestr)
     
 def list_powerset(lst):
